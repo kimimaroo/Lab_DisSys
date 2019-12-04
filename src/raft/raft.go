@@ -262,17 +262,8 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 				}
 			}
 		}
-		// for{
-		if rf.lastApplied < rf.commitIndex {
-			rf.lastApplied++
-			applyMessege := ApplyMsg{Index: rf.lastApplied, Command: rf.log[rf.lastApplied-1].Command}
-			rf.applyCh <- applyMessege 
-		}
-		// else{
-		// 	break
-		// }
-		// }
-		// fmt.Println("heartbeat===rf.log:",rf.log,"\t",rf.commitIndex,"   ID:",rf.me,"  LeaderID",rf.leaderID,args.Term)
+
+		fmt.Println("heartbeat===rf.log:",rf.log,"\t",rf.commitIndex,"   ID:",rf.me,"  LeaderID",rf.leaderID,args.Term)
 		if args.Entries != nil {
 			fmt.Println("RPC---rf.log:",rf.log,"\t",rf.commitIndex,"   ID:",rf.me)
 			if args.PrevLogIndex == 0 {
@@ -291,6 +282,17 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			}
 			fmt.Println("RPC---rf.log---after:",rf.log,"\t",rf.commitIndex,"   ID:",rf.me)
 		}
+
+		// for{
+		if rf.lastApplied < rf.commitIndex {
+			rf.lastApplied++
+			applyMessege := ApplyMsg{Index: rf.lastApplied, Command: rf.log[rf.lastApplied-1].Command}
+			rf.applyCh <- applyMessege 
+		}
+		// else{
+		// 	break
+		// }
+		// }
 	}
 }
 
@@ -539,7 +541,7 @@ func (rf *Raft) startAppendEntries() {
 				        	                  PrevLogTerm: newLogTerm, 
 				            	              Entries: rf.log[rf.nextIndex[peerID] - 1 :], 
 				                	          LeaderCommit: rf.commitIndex}
-				    fmt.Println("-------------Entries:",args.Entries)
+				    fmt.Println("-------------Entries:",args.Entries, args.LeaderCommit)
 					reply := AppendEntriesReply{}
 					comFlag := rf.sendAppendEntries(peerID, args, &reply)  // if false: communication error
 					if comFlag {
