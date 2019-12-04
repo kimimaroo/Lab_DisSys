@@ -21,7 +21,7 @@ import "sync"
 import "labrpc"
 import "time"
 import "math/rand"
-// import "fmt"
+import "fmt"
 
 // import "bytes"
 // import "encoding/gob"
@@ -177,6 +177,16 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		rf.electionTimeout = getElectionTimeout()
 		rf.electionTimer.Reset(rf.electionTimeout)
 	}
+
+	if len(rf.log) > 0 {
+		if rf.log[len(rf.log) - 1].Term > args.LastLogTerm {
+			reply.VoteGranted = false
+			rf.votedFor = -1
+		} else if rf.log[len(rf.log) - 1].Term == args.LastLogTerm && len(rf.log) > args.LastLogIndex {
+			reply.VoteGranted = false
+			rf.votedFor = -1
+		}
+	}
 }
 
 //
@@ -252,13 +262,19 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 				}
 			}
 		}
+		// for{
 		if rf.lastApplied < rf.commitIndex {
 			rf.lastApplied++
 			applyMessege := ApplyMsg{Index: rf.lastApplied, Command: rf.log[rf.lastApplied-1].Command}
 			rf.applyCh <- applyMessege 
 		}
-		// fmt.Println("RPC---rf.log:",rf.log,"\t",rf.commitIndex,"   ID:",rf.me)
+		// else{
+		// 	break
+		// }
+		// }
+		// fmt.Println("heartbeat===rf.log:",rf.log,"\t",rf.commitIndex,"   ID:",rf.me,"  LeaderID",rf.leaderID,args.Term)
 		if args.Entries != nil {
+			fmt.Println("RPC---rf.log:",rf.log,"\t",rf.commitIndex,"   ID:",rf.me)
 			if args.PrevLogIndex == 0 {
 				reply.Success = true
 			} else if len(rf.log) < args.PrevLogIndex {
@@ -273,7 +289,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 				rf.log = rf.log[:args.PrevLogIndex]
 				rf.log = append(rf.log, args.Entries...)
 			}
-		// fmt.Println("RPC---rf.log---after:",rf.log,"\t",rf.commitIndex,"   ID:",rf.me)
+			fmt.Println("RPC---rf.log---after:",rf.log,"\t",rf.commitIndex,"   ID:",rf.me)
 		}
 	}
 }
@@ -306,7 +322,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := (rf.state == 2)
 
-	// fmt.Println("Start----SENDCCCCC",command)
+	fmt.Println("Start----SENDCCCCC",command)
 
 	if isLeader {
 		var logEntryNew logEntry
@@ -319,7 +335,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		go rf.startAppendEntries()
 	}
 
-	// fmt.Println("Start---leaderlog:",rf.log,"   leaderID:",rf.leaderID)
+	fmt.Println("Start---log:",rf.log,"   meID:",rf.me,"   state:",rf.state)
 
 
 	return index, term, isLeader
@@ -408,7 +424,14 @@ func (rf *Raft) leaderElection() {
 			}
 
 			go func(rf *Raft, index int) {
-				args := RequestVoteArgs{Term: rf.currentTerm, CandidateID: rf.me}
+				var newLogTerm int
+				if len(rf.log) == 0 {
+					newLogTerm = -1
+				} else {
+					newLogTerm = rf.log[len(rf.log) - 1].Term
+				}
+				args := RequestVoteArgs{Term: rf.currentTerm, CandidateID: rf.me,
+				                        LastLogIndex: len(rf.log), LastLogTerm: newLogTerm}
 				reply := RequestVoteReply{}
 				comFlag := rf.sendRequestVote(index, args, &reply)  // if false: communication error
 				if comFlag {
@@ -510,23 +533,27 @@ func (rf *Raft) startAppendEntries() {
 					} else {
 						newLogTerm = rf.log[rf.nextIndex[peerID] - 2].Term
 					}
+					fmt.Println("===matchAndNext===:",rf.matchIndex[peerID],rf.nextIndex[peerID],peerID)
 					args := AppendEntriesArgs{Term: rf.currentTerm, LeaderID: rf.me,
 				    	                      PrevLogIndex: rf.nextIndex[peerID] - 1,
 				        	                  PrevLogTerm: newLogTerm, 
 				            	              Entries: rf.log[rf.nextIndex[peerID] - 1 :], 
 				                	          LeaderCommit: rf.commitIndex}
+				    fmt.Println("-------------Entries:",args.Entries)
 					reply := AppendEntriesReply{}
 					comFlag := rf.sendAppendEntries(peerID, args, &reply)  // if false: communication error
 					if comFlag {
-						rf.mu.Lock()
-						defer rf.mu.Unlock()
+						// rf.mu.Lock()
+						// defer rf.mu.Unlock()
 
 						// Ensure that we're still a leader
 						if rf.state != 2 {
 							return
 						}
-
+						
 						if reply.Term > rf.currentTerm {
+							rf.mu.Lock()
+							defer rf.mu.Unlock()
 							rf.currentTerm = reply.Term
 							rf.state = 0
 							rf.votedFor = -1
@@ -534,11 +561,18 @@ func (rf *Raft) startAppendEntries() {
 							rf.electionTimeout = getElectionTimeout()
 							rf.electionTimer.Reset(rf.electionTimeout)
 							return
-						} else if reply.Success == false {
+						}
+
+						if reply.Success == false {
+							rf.mu.Lock()
 							rf.nextIndex[peerID]--
+							rf.mu.Unlock()
 						} else {
+							rf.mu.Lock()
+							defer rf.mu.Unlock()
 							rf.matchIndex[peerID] = len(rf.log)
 							rf.nextIndex[peerID] = rf.matchIndex[peerID] + 1
+							fmt.Println("matchAndNext:",rf.matchIndex[peerID],rf.nextIndex[peerID],peerID)
 							copyCount++
 							if copyCount > len(rf.peers)/2 {
 								rf.commitIndex = rf.log[len(rf.log) - 1].Index
@@ -550,11 +584,13 @@ func (rf *Raft) startAppendEntries() {
 									// 	case <-rf.applyCh:
 									// 	default:
 									// }
-									rf.applyCh <- applyMessege 
+									rf.applyCh <- applyMessege
 								}
 							}
 							return
 						}
+					} else {
+						return
 					}
 				}
 			}(rf, i)
