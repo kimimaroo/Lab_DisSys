@@ -21,6 +21,7 @@ import "sync"
 import "labrpc"
 import "time"
 import "math/rand"
+// import "fmt"
 
 // import "bytes"
 // import "encoding/gob"
@@ -40,9 +41,9 @@ type ApplyMsg struct {
 }
 
 type logEntry struct {
-	index       int             // first index is 1
-	term        int             // when entry was received by leader
-	command     interface{}     // for state machine
+	Index       int             // first index is 1
+	Term        int             // when entry was received by leader
+	Command     interface{}     // for state machine
 }
 
 //
@@ -74,6 +75,8 @@ type Raft struct {
 	heartbeatTimeout    time.Duration
 	electionTimer       *time.Timer
 	heartbeatTimer      *time.Timer
+
+	applyCh             chan ApplyMsg
 
 	iskilled            bool    // for debug
 }
@@ -203,6 +206,10 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 type AppendEntriesArgs struct {
 	Term        int         // leader’s term
 	LeaderID    int
+	PrevLogIndex    int
+	PrevLogTerm     int
+	Entries         []logEntry
+	LeaderCommit    int	 						
 }
 
 // AppendEntries RPC reply structure.
@@ -220,11 +227,14 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		return
 	}
 
+	// fmt.Println("RPC---Entries", args.Entries)
+
+
 	if args.Term < rf.currentTerm {
 		reply.Success = false
-		reply.Term = rf.currentTerm		
+		reply.Term = rf.currentTerm
+		return		
 	} else if args.Term >= rf.currentTerm {     // Become follower
-		reply.Success = true
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.leaderID = args.LeaderID
@@ -232,6 +242,39 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		reply.Term = rf.currentTerm
 		rf.electionTimeout = getElectionTimeout()
 		rf.electionTimer.Reset(rf.electionTimeout)
+
+		if rf.log != nil {
+			if args.LeaderCommit > rf.commitIndex {
+				if args.LeaderCommit < rf.log[len(rf.log) - 1].Index {
+					rf.commitIndex = args.LeaderCommit
+				} else {
+					rf.commitIndex = rf.log[len(rf.log) - 1].Index
+				}
+			}
+		}
+		if rf.lastApplied < rf.commitIndex {
+			rf.lastApplied++
+			applyMessege := ApplyMsg{Index: rf.lastApplied, Command: rf.log[rf.lastApplied-1].Command}
+			rf.applyCh <- applyMessege 
+		}
+		// fmt.Println("RPC---rf.log:",rf.log,"\t",rf.commitIndex,"   ID:",rf.me)
+		if args.Entries != nil {
+			if args.PrevLogIndex == 0 {
+				reply.Success = true
+			} else if len(rf.log) < args.PrevLogIndex {
+				reply.Success = false
+			} else if rf.log[args.PrevLogIndex - 1].Term != args.PrevLogTerm {
+				reply.Success = false
+			} else {
+				reply.Success = true
+			}
+
+			if reply.Success {
+				rf.log = rf.log[:args.PrevLogIndex]
+				rf.log = append(rf.log, args.Entries...)
+			}
+		// fmt.Println("RPC---rf.log---after:",rf.log,"\t",rf.commitIndex,"   ID:",rf.me)
+		}
 	}
 }
 
@@ -257,9 +300,26 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := (rf.state == 2)
+
+	// fmt.Println("Start----SENDCCCCC",command)
+
+	if isLeader {
+		var logEntryNew logEntry
+		logEntryNew.Index = len(rf.log) + 1
+		logEntryNew.Term = rf.currentTerm
+		logEntryNew.Command = command 
+		rf.log = append(rf.log, logEntryNew)
+		index = rf.log[len(rf.log) - 1].Index
+		term = rf.log[len(rf.log) - 1].Term
+		go rf.startAppendEntries()
+	}
+
+	// fmt.Println("Start---leaderlog:",rf.log,"   leaderID:",rf.leaderID)
 
 
 	return index, term, isLeader
@@ -304,6 +364,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.heartbeatTimeout = time.Duration(100) * time.Millisecond     // 100ms
 	rf.electionTimer = time.NewTimer(rf.electionTimeout)
 	rf.heartbeatTimer = time.NewTimer(rf.heartbeatTimeout)
+
+    rf.nextIndex = make([]int, len(peers))
+    rf.matchIndex = make([]int, len(peers))
+	rf.applyCh = applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -373,6 +437,9 @@ func (rf *Raft) leaderElection() {
 						rf.state = 2
 						rf.leaderID = rf.me
 						rf.electionTimer.Stop()
+						for i, _ := range rf.nextIndex {
+							rf.nextIndex[i] = len(rf.log) + 1
+						}
 						go rf.startHeartbeat()
 					}
 				}
@@ -404,7 +471,7 @@ func (rf *Raft) heartbeat() {
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
 			go func(rf *Raft, index int) {
-				args := AppendEntriesArgs{Term: rf.currentTerm, LeaderID: rf.me}
+				args := AppendEntriesArgs{Term: rf.currentTerm, LeaderID: rf.me, LeaderCommit: rf.commitIndex}
 				reply := AppendEntriesReply{}
 				comFlag := rf.sendAppendEntries(index, args, &reply)  // if false: communication error
 				if comFlag {
@@ -424,6 +491,70 @@ func (rf *Raft) heartbeat() {
 						rf.electionTimeout = getElectionTimeout()
 						rf.electionTimer.Reset(rf.electionTimeout)
 						return
+					}
+				}
+			}(rf, i)
+		}
+	}
+}
+
+func (rf *Raft) startAppendEntries() {
+	var copyCount int = 1
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			go func(rf *Raft, peerID int) {
+				for{
+					var newLogTerm int
+					if rf.nextIndex[peerID] == 1 {
+						newLogTerm = -1
+					} else {
+						newLogTerm = rf.log[rf.nextIndex[peerID] - 2].Term
+					}
+					args := AppendEntriesArgs{Term: rf.currentTerm, LeaderID: rf.me,
+				    	                      PrevLogIndex: rf.nextIndex[peerID] - 1,
+				        	                  PrevLogTerm: newLogTerm, 
+				            	              Entries: rf.log[rf.nextIndex[peerID] - 1 :], 
+				                	          LeaderCommit: rf.commitIndex}
+					reply := AppendEntriesReply{}
+					comFlag := rf.sendAppendEntries(peerID, args, &reply)  // if false: communication error
+					if comFlag {
+						rf.mu.Lock()
+						defer rf.mu.Unlock()
+
+						// Ensure that we're still a leader
+						if rf.state != 2 {
+							return
+						}
+
+						if reply.Term > rf.currentTerm {
+							rf.currentTerm = reply.Term
+							rf.state = 0
+							rf.votedFor = -1
+							rf.heartbeatTimer.Stop()
+							rf.electionTimeout = getElectionTimeout()
+							rf.electionTimer.Reset(rf.electionTimeout)
+							return
+						} else if reply.Success == false {
+							rf.nextIndex[peerID]--
+						} else {
+							rf.matchIndex[peerID] = len(rf.log)
+							rf.nextIndex[peerID] = rf.matchIndex[peerID] + 1
+							copyCount++
+							if copyCount > len(rf.peers)/2 {
+								rf.commitIndex = rf.log[len(rf.log) - 1].Index
+								if rf.lastApplied < rf.commitIndex {
+									rf.lastApplied++
+									applyMessege := ApplyMsg{Index: rf.lastApplied, Command: rf.log[rf.lastApplied-1].Command}
+									// fmt.Println("startRPC---applyMSG:",applyMessege)
+									// select {
+									// 	case <-rf.applyCh:
+									// 	default:
+									// }
+									rf.applyCh <- applyMessege 
+								}
+							}
+							return
+						}
 					}
 				}
 			}(rf, i)
