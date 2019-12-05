@@ -228,6 +228,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term        int         // currentTerm, for leader to update itself
 	Success     bool        // true if follower contained entry matching prevLogIndex and prevLogTerm
+	ConflictIndex   int
 }
 
 // AppendEntries RPC handler.
@@ -266,13 +267,20 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		// }
 
 		// if args.Entries != nil {
-		
+		// reply.conflictIndex = args.PrevLogIndex + 1
 		if args.PrevLogIndex == 0 {
 			reply.Success = true
 		} else if len(rf.log) < args.PrevLogIndex {
 			reply.Success = false
+			reply.ConflictIndex = len(rf.log) + 1
 		} else if rf.log[args.PrevLogIndex - 1].Term != args.PrevLogTerm {
 			reply.Success = false
+			for i := 0; i < len(rf.log); i++ {
+				if rf.log[i].Term == rf.log[args.PrevLogIndex - 1].Term {
+					reply.ConflictIndex = i + 1
+					break
+				}
+			}
 		} else {
 			reply.Success = true
 		}
@@ -576,7 +584,7 @@ func (rf *Raft) heartbeat() {
 
 						if reply.Success == false {
 							rf.mu.Lock()
-							rf.nextIndex[peerID]--
+							rf.nextIndex[peerID] = reply.ConflictIndex
 							rf.mu.Unlock()
 						} else {
 							// rf.mu.Lock()
@@ -641,7 +649,7 @@ func (rf *Raft) startAppendEntries() {
 
 						if reply.Success == false {
 							rf.mu.Lock()
-							rf.nextIndex[peerID]--
+							rf.nextIndex[peerID] = reply.ConflictIndex
 							rf.mu.Unlock()
 						} else {
 							rf.mu.Lock()
